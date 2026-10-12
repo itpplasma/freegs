@@ -136,3 +136,42 @@ def test_multi_coil_circuit_force_matches_independent_coils():
             f_circuit["C"][label], f_independent[label], rtol=1e-10, atol=0.0
         )
     assert np.allclose(f_circuit["X"], f_independent["X"], rtol=1e-10, atol=0.0)
+
+
+def test_mirrored_coil_positions_and_symmetry():
+    """
+    MirroredCoil places one coil at (R, Z) and one at (R, -Z); for
+    symmetric=True (same current direction) the field is mirror symmetric
+    """
+    Rcoil, Zcoil, current = 1.5, 1.0, 123.0
+    mirrored = machine.MirroredCoil(Rcoil, Zcoil)
+    # Set the current after construction: the current argument of
+    # MirroredCoil is overwritten by the Circuit constructor
+    mirrored.current = current
+
+    upper = mirrored["U"]
+    lower = mirrored["L"]
+    assert math.isclose(upper.R, Rcoil)
+    assert math.isclose(upper.Z, Zcoil)
+    assert math.isclose(lower.R, Rcoil)
+    assert math.isclose(lower.Z, -Zcoil)
+
+    def analytic_Bz(z):
+        # On-axis field of two loops at +/- Zcoil, each of radius Rcoil
+        return (
+            (mu0 / 2)
+            * Rcoil**2
+            * current
+            * (
+                ((z - Zcoil) ** 2 + Rcoil**2) ** -1.5
+                + ((z + Zcoil) ** 2 + Rcoil**2) ** -1.5
+            )
+        )
+
+    assert math.isclose(mirrored.Bz(0.001, 0.3), analytic_Bz(0.3), abs_tol=1e-8)
+    assert math.isclose(mirrored.Bz(0.001, -0.3), analytic_Bz(-0.3), abs_tol=1e-8)
+
+    # Mirror symmetry in Z: Bz even, Br odd
+    R, Z = 0.8, 0.45
+    assert math.isclose(mirrored.Bz(R, Z), mirrored.Bz(R, -Z), rel_tol=1e-10)
+    assert math.isclose(mirrored.Br(R, Z), -mirrored.Br(R, -Z), rel_tol=1e-10)

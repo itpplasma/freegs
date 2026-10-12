@@ -326,7 +326,25 @@ class Equilibrium:
         """
         return self._profiles.fvac()
 
-    def q(self, psinorm=None, npsi=100):
+    # Sauter and Medvedev COCOS of the native representation: Br=-dpsi/dZ/R,
+    # Bz=dpsi/dR/R (sigma_Bp=-1), psi per radian, right-handed (R, phi, Z)
+    # and theta counter-clockwise in the (R, Z) plane, so that (rho, theta, phi)
+    # is left-handed (sigma_rho_theta_phi=-1).
+    cocos = 3
+
+    @staticmethod
+    def _q_sign(cocos):
+        """
+        sigma_rho_theta_phi of a COCOS. The physical field is unchanged by a
+        change of COCOS, only the orientation of theta and phi:
+        sign(q) = sigma_rho_theta_phi * sign(Ip) * sign(B0).
+        """
+        if cocos not in (*range(1, 9), *range(11, 19)):
+            raise ValueError(f"Invalid COCOS: {cocos}")
+        # sigma_rho_theta_phi is -1 for the odd pair of each group of four
+        return 1 if cocos % 10 in (1, 2, 5, 6) else -1
+
+    def q(self, psinorm=None, npsi=100, cocos=None):
         """
         Returns safety factor q at specified values of normalised psi
 
@@ -339,16 +357,30 @@ class Equilibrium:
 
         >>> psinorm, q = eq.q()
 
+        q is signed according to the COCOS of the equilibrium (``eq.cocos``,
+        3), for which sign(q) = -sign(Ip * B0): it is negative for a plasma
+        current and toroidal field both along +phi. It is the winding of the
+        field lines with theta counter-clockwise in the (R, Z) plane. A
+        different COCOS can be requested, e.g. ``cocos=1`` gives q > 0 for
+        Ip * B0 > 0.
+
         Note: psinorm = 0 is the magnetic axis, and psinorm = 1 is the separatrix.
               If you request a value close to either of these limits, an extrapolation
               based on a 1D grid of values from 0.01 to 0.99 will be used. This gives
               smooth and continuous q-profiles, but comes at an increased computational
               cost.
         """
+        # Native sigma_rho_theta_phi is -1
+        sign = 1 if cocos is None else -self._q_sign(cocos)
+
         if psinorm is None:
             # An array which doesn't include psinorm = 0 or 1
             psinorm = linspace(1.0 / (npsi + 1), 1.0, npsi, endpoint=False)
-            return psinorm, critical.find_safety(self, psinorm=psinorm)
+            return psinorm, sign * critical.find_safety(self, psinorm=psinorm)
+
+        psinorm = np.asarray(psinorm, dtype=float)
+        scalar = psinorm.ndim == 0
+        psinorm = np.atleast_1d(psinorm)
 
         if np.any((psinorm < 0.01) | (psinorm > 0.99)):
             psinorm_inner = np.linspace(0.01, 0.99, num=npsi)
@@ -361,26 +393,46 @@ class Equilibrium:
         else:
             result = critical.find_safety(self, psinorm=psinorm)
 
+        result = sign * np.asarray(result)
+
         # Convert to a scalar if only one result
-        if np.size(result) == 1:
-            return float(result)
+        if scalar or result.size == 1:
+            return result.item()
         return result
+
+    def _tor_flux_profile(self, npsi=101):
+        """
+        Toroidal flux on a uniform grid in poloidal flux from the axis to the
+        boundary. Returns increasing psi and the flux through each surface.
+        """
+        psi = np.linspace(self.psi_axis, self.psi_bndry, npsi, endpoint=True)
+        qvals = self.q(np.linspace(0.0, 1.0, npsi, endpoint=True))
+        # dPhi = 2 pi q dpsi, with psi per radian and q in the native COCOS:
+        # Phi has the sign of B0 for either polarity of Ip.
+        flux = 2.0 * np.pi * cumulative_trapezoid(qvals, psi, initial=0.0)
+        if psi[0] > psi[-1]:
+            return psi[::-1], flux[::-1]
+        return psi, flux
 
     def tor_flux(self, psi=None):
         """
         Calculates toroidal flux at specified values of poloidal flux.
         >>> q = drho/dpsi
-        """
-        psiN = (psi - self.psi_axis) / (self.psi_bndry - self.psi_axis)
-        # Get safety factor of these flux surfaces
-        qvals = self.q(psiN)
 
-        # Integrate q wrt psi to get rho. rho = 0 @ psiN = 0
-        result = cumulative_trapezoid(qvals, psi, initial=0.0) * (-1.0 / (2.0 * np.pi))
+        The flux is that through the surface along +phi, so it has the sign
+        of the toroidal field. psi may be a scalar or array, and defaults to
+        100 uniform intervals between the axis and the boundary.
+        """
+        if psi is None:
+            psi = np.linspace(self.psi_axis, self.psi_bndry, 101, endpoint=True)
+        psi = np.asarray(psi, dtype=float)
+
+        psi_grid, flux_grid = self._tor_flux_profile()
+        result = np.interp(psi, psi_grid, flux_grid)
 
         # Convert to a scalar if only one result
-        if len(result) == 1:
-            return result[0]
+        if result.ndim == 0:
+            return result.item()
         return result
 
     def rhotor(self, psi=None):
@@ -392,18 +444,18 @@ class Equilibrium:
 
         Maximum toroidal flux shoud be at LCFS.
         """
+        if psi is None:
+            psi = np.linspace(self.psi_axis, self.psi_bndry, 101, endpoint=True)
+        psi = np.asarray(psi, dtype=float)
 
-        torflux = self.tor_flux(psi)
+        psi_grid, flux_grid = self._tor_flux_profile()
+        torflux = np.interp(psi, psi_grid, flux_grid)
 
-        psi = np.linspace(self.psi_axis, self.psi_bndry, 101, endpoint=True)
-        torflux_for_LCFS = self.tor_flux(psi)
+        # The flux at the LCFS, with the same sign as the profile
+        result = np.sqrt(np.clip(torflux / flux_grid[np.argmax(np.abs(flux_grid))], 0.0, None))
 
-        max_torflux = np.max(torflux_for_LCFS)
-
-        result = np.sqrt(torflux / max_torflux)
-
-        if len(result) == 1:
-            return result[0]
+        if result.ndim == 0:
+            return result.item()
         return result
 
     def pprime(self, psinorm):

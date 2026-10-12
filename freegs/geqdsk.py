@@ -51,6 +51,11 @@ def write(eq, fh, label=None, oxpoints=None, fileformat=geqdsk.write):
     """
     Write a GEQDSK equilibrium file, given a FreeGS Equilibrium object
 
+    The file is in the native COCOS of the equilibrium (``eq.cocos``, 3): psi
+    per radian, decreasing outward for Ip > 0 (so ``sibdry - simagx`` has the
+    opposite sign of ``cpasma``), and ``qpsi`` signed as ``eq.q``, which for
+    COCOS 3 is negative when ``cpasma * fpol`` is positive.
+
     Parameters
     ----------
     eq:
@@ -115,7 +120,7 @@ def write(eq, fh, label=None, oxpoints=None, fileformat=geqdsk.write):
     data["simagx"] = 0.0
 
     qpsi = zeros([nx])
-    qpsi[1:] = eq.q(psinorm[1:])  # Exclude axis
+    qpsi[1:] = eq.q(psinorm[1:])  # Exclude axis; signed for COCOS 3
     qpsi[0] = qpsi[1]
     data["qpsi"] = qpsi
 

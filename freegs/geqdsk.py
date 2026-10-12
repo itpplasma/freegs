@@ -34,7 +34,6 @@ from numpy import (
     linspace,
     ravel,
     reshape,
-    zeros,
 )
 from scipy import interpolate
 from scipy.integrate import romb
@@ -58,6 +57,19 @@ def write(eq, fh, label=None, oxpoints=None, fileformat=geqdsk.write):
     per radian, decreasing outward for Ip > 0 (so ``sibdry - simagx`` has the
     opposite sign of ``cpasma``), and ``qpsi`` signed as ``eq.q``, which for
     COCOS 3 is negative when ``cpasma * fpol`` is positive.
+
+    The 1D profiles (``fpol``, ``pres``, ``ffprime``, ``pprime``, ``qpsi``) are
+    written on ``nx`` points uniformly spaced in poloidal flux from the axis
+    (``simagx``) to the boundary (``sibdry``), both included, as defined by the
+    G-EQDSK format (FreeQDSK documentation: "linearly spaced psi grid which may
+    be generated using ``numpy.linspace(simagx, sibdry, nx)``"). The last entry
+    is therefore the value at the LCFS, and the first the value on axis. ``qpsi``
+    at these two surfaces is the extrapolation of `Equilibrium.q`, because the
+    surface integral is singular there (at an X-point q diverges
+    logarithmically, so ``qpsi[-1]`` is a finite estimate).
+
+    When the plasma is diverted, the X-point is a vertex of the boundary polygon
+    (``rbdry``, ``zbdry``).
 
     Parameters
     ----------
@@ -109,7 +121,9 @@ def write(eq, fh, label=None, oxpoints=None, fileformat=geqdsk.write):
 
     data["cpasma"] = eq.plasmaCurrent()  # Plasma current [A]
 
-    psinorm = linspace(0.0, 1.0, nx, endpoint=False)  # Does not include separatrix
+    # Axis (psiN=0) to separatrix (psiN=1), both included, as in the G-EQDSK
+    # definition and in `read` below
+    psinorm = linspace(0.0, 1.0, nx, endpoint=True)
 
     data["fpol"] = eq.fpol(psinorm)
     data["pres"] = eq.pressure(psinorm)
@@ -122,10 +136,9 @@ def write(eq, fh, label=None, oxpoints=None, fileformat=geqdsk.write):
     data["psi"] = psi - data["simagx"]
     data["simagx"] = 0.0
 
-    qpsi = zeros([nx])
-    qpsi[1:] = eq.q(psinorm[1:])  # Exclude axis; signed for COCOS 3
-    qpsi[0] = qpsi[1]
-    data["qpsi"] = qpsi
+    # Signed for COCOS 3. Values within 0.01 of the axis or the boundary are
+    # extrapolated from the interior by Equilibrium.q
+    data["qpsi"] = eq.q(psinorm)
 
     # rlim, zlim contain the wall, if there is one.
 
@@ -139,6 +152,13 @@ def write(eq, fh, label=None, oxpoints=None, fileformat=geqdsk.write):
         critical.find_separatrix(eq, ntheta=101, opoint=opoint, xpoint=xpoint, psi=psi)
     )
 
+    # The ray-traced points miss the X-point corner of a diverted separatrix:
+    # insert it into the closed polygon, on the segment nearest to it.
+    if xpoint and abs(xpoint[0][2] - eq.psi_bndry) <= 1e-4 * abs(
+        eq.psi_bndry - opoint[0][2]
+    ):
+        isoflux = _insert_vertex(isoflux[:, 0:2], xpoint[0][0:2])
+
     ind = np.argmin(isoflux[:, 1])
     data["rbdry"] = np.roll(isoflux[:, 0][::-1], -ind)
     data["rbdry"] = np.append(data["rbdry"], data["rbdry"][0])
@@ -148,6 +168,25 @@ def write(eq, fh, label=None, oxpoints=None, fileformat=geqdsk.write):
 
     # Call fileformat to write the data
     fileformat(data, fh, label=label)
+
+
+def _insert_vertex(points, vertex):
+    """
+    Insert vertex into the closed polygon with the given (n, 2) vertices,
+    on the edge (including the edge closing the polygon) nearest to it.
+    Returns an (n+1, 2) array.
+    """
+    points = np.asarray(points, dtype=float)
+    vertex = np.asarray(vertex, dtype=float)
+    nxt = np.roll(points, -1, axis=0)
+    edge = nxt - points
+    # Projection of vertex onto each edge, clipped to the edge
+    t = np.clip(
+        np.sum((vertex - points) * edge, axis=1) / np.sum(edge**2, axis=1), 0.0, 1.0
+    )
+    dist = np.hypot(*(points + t[:, None] * edge - vertex).T)
+    i = int(np.argmin(dist))
+    return np.insert(points, i + 1, vertex, axis=0)
 
 
 def isPow2(val):
@@ -205,7 +244,7 @@ def read(
     cocos :
         COordinate COnventions. Not fully handled yet,
         only whether psi is divided by 2pi or not.
-        if < 10 then psi is divided by 2pi, otherwise not.
+        if > 10 then psi is divided by 2pi, otherwise not (as freeqdsk).
     domain :
         Sets the (R,Z) domain to solve for ``(Rmin, Rmax, Zmin, Zmax)``
     blend :
@@ -250,10 +289,17 @@ def read(
     # Read the data as a Dictionary
     data = geqdsk.read(fh, cocos=cocos)
 
-    # If data contains a limiter, set the machine wall
-    if data.rlim is not None:
-        if len(data.rlim) > 3:
-            machine.wall = Wall(data.rlim, data.zlim)
+    # If data contains a limiter, set the machine wall.
+    # freeqdsk < 0.5 returns a dict, which has no "rlim" key without a limiter,
+    # while freeqdsk >= 0.5 returns a GEQDSKFile, which only supports
+    # string indexing and has no __contains__.
+    try:
+        rlim, zlim = data["rlim"], data["zlim"]
+    except (KeyError, AttributeError):
+        rlim = zlim = None
+    if rlim is not None and len(rlim) > 0:
+        if len(rlim) > 3:
+            machine.wall = Wall(rlim, zlim)
         else:
             logger.warning("Fewer than 3 points given for limiter/wall. Ignoring.")
 
@@ -374,6 +420,7 @@ def read(
         # to keep the resolution as good or better than the input
         Rmin, Rmax, Zmin, Zmax = domain
         # Calculate approximate grid size needed to keep current resolution
+        newnx, newny = nx, ny
         fnewnx = (Rmax - Rmin) / dR + 1.0
         if fnewnx > nx:
             newnx = int(ceilPow2(fnewnx - 1)) + 1
@@ -384,34 +431,37 @@ def read(
         if (newnx != nx) or (newny != ny):
             logger.info("Changing resolution: %d x %d", newnx, newny)
 
-        # Create an interpolation function for Jtor and the input psi
-        Jtor_func = interpolate.RectBivariateSpline(eq.R[:, 0], eq.Z[0, :], Jtor)
+        # Create an interpolation function for the input psi
         psi_func = interpolate.RectBivariateSpline(eq.R[:, 0], eq.Z[0, :], psi)
 
+        # Interpolate psi onto the new grid. psi_axis and psi_bndry are kept
+        # from the input grid, so that psi_norm is unchanged where the
+        # domains overlap.
+        Rnew, Znew = np.meshgrid(
+            linspace(Rmin, Rmax, newnx), linspace(Zmin, Zmax, newny), indexing="ij"
+        )
+        psi = psi_func(Rnew, Znew, grid=False)
+
         # Create a new Equilibrium object
-        # (replacing previous 'eq')
+        # (replacing previous 'eq'). The input psi gives the new core mask.
         eq = Equilibrium(
             tokamak=machine,
             Rmin=Rmin,
             Rmax=Rmax,
             Zmin=Zmin,
             Zmax=Zmax,
-            nx=nx,
-            ny=ny,
+            nx=newnx,
+            ny=newny,
             check_limited=True,
+            psi=psi,
         )
-
-        # Interpolate Jtor and psi onto new grid
-        Jtor = Jtor_func(eq.R, eq.Z, grid=False)
-        psi = psi_func(eq.R, eq.Z, grid=False)
-
-        psi_bndry = eq.psi_bndry
-        psi_axis = eq.psi_axis
         mask = eq.mask
 
-        # Update the mask function by calculating normalised psi
-        # on the new grid
+        # Normalised psi and the toroidal current on the new grid
         psi_norm = clip((psi - psi_axis) / (psi_bndry - psi_axis), 0.0, 1.0)
+        Jtor = eq.R * pprime_func(psi_norm) + ffprime_func(psi_norm) / (eq.R * mu0)
+        if mask is not None:
+            Jtor *= mask
 
     # Note: Here we have
     #   eq : Equilibrium object

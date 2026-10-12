@@ -39,7 +39,12 @@ class Profile(abc.ABC):
     which assume that the following methods are available:
        pprime(psinorm), ffprime(psinorm), fvac()
 
+    If ``smooth_mask`` is True, Jtor weights boundary cells by their area
+    fraction inside the plasma (see `critical.core_mask`). It is switched on
+    by `Equilibrium.solve` for an Equilibrium created with ``smooth_mask=True``.
     """
+
+    smooth_mask = False
 
     def pressure(self, psinorm, out=None):
         """
@@ -188,10 +193,14 @@ class ConstrainBetapIp(Profile):
         psi_axis = opt[0][2]
 
         if psi_bndry is not None:
-            mask = critical.core_mask(R, Z, psi, opt, xpt, psi_bndry)
+            mask = critical.core_mask(
+                R, Z, psi, opt, xpt, psi_bndry, smooth=self.smooth_mask
+            )
         elif xpt:
             psi_bndry = xpt[0][2]
-            mask = critical.core_mask(R, Z, psi, opt, xpt)
+            mask = critical.core_mask(
+                R, Z, psi, opt, xpt, smooth=self.smooth_mask
+            )
         else:
             # No X-points
             psi_bndry = psi[0, 0]
@@ -350,10 +359,14 @@ class ConstrainPaxisIp(Profile):
         psi_axis = opt[0][2]
 
         if psi_bndry is not None:
-            mask = critical.core_mask(R, Z, psi, opt, xpt, psi_bndry)
+            mask = critical.core_mask(
+                R, Z, psi, opt, xpt, psi_bndry, smooth=self.smooth_mask
+            )
         elif xpt:
             psi_bndry = xpt[0][2]
-            mask = critical.core_mask(R, Z, psi, opt, xpt)
+            mask = critical.core_mask(
+                R, Z, psi, opt, xpt, smooth=self.smooth_mask
+            )
         else:
             # No X-points
             psi_bndry = psi[0, 0]
@@ -472,10 +485,14 @@ class ProfilesPprimeFfprime(Profile):
         psi_axis = opt[0][2]
 
         if psi_bndry is not None:
-            mask = critical.core_mask(R, Z, psi, opt, xpt, psi_bndry)
+            mask = critical.core_mask(
+                R, Z, psi, opt, xpt, psi_bndry, smooth=self.smooth_mask
+            )
         elif xpt:
             psi_bndry = xpt[0][2]
-            mask = critical.core_mask(R, Z, psi, opt, xpt)
+            mask = critical.core_mask(
+                R, Z, psi, opt, xpt, smooth=self.smooth_mask
+            )
         else:
             # No X-points
             psi_bndry = psi[0, 0]

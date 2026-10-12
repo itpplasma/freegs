@@ -222,3 +222,50 @@ def test_find_separatrix_without_xpoint_raises():
     Eq.R, Eq.Z = R, Z
     with pytest.raises(ValueError, match="X-point"):
         critical.find_separatrix(Eq, psi=psi)
+
+
+def _disc_mask_area(n, smooth, radius, centre=(0.013, -0.021)):
+    # psi = squared distance from the centre: one O-point, boundary psi = radius^2
+    R, Z = np.meshgrid(np.linspace(-1, 1, n), np.linspace(-1, 1, n), indexing="ij")
+    psi = (R - centre[0]) ** 2 + (Z - centre[1]) ** 2
+    opoint = [(centre[0], centre[1], 0.0)]
+    mask = critical.core_mask(R, Z, psi, opoint, [], psi_bndry=radius**2, smooth=smooth)
+    h = 2.0 / (n - 1)
+    return mask.sum() * h * h, np.pi * radius**2
+
+
+def test_smooth_core_mask_area_converges_second_order():
+    # The area of a disc is known analytically; rms error over a set of radii
+    # must converge at second order and beat the hard mask.
+    radii = np.linspace(0.45, 0.65, 5)
+    rms = {True: [], False: []}
+    for smooth in (False, True):
+        for n in (33, 65, 129):
+            err = [a / exact - 1 for a, exact in (_disc_mask_area(n, smooth, r) for r in radii)]
+            rms[smooth].append(np.sqrt(np.mean(np.square(err))))
+    assert all(s < h for s, h in zip(rms[True], rms[False]))
+    # second order: the error drops by ~16 over two halvings of the cell size
+    assert rms[True][0] / rms[True][2] > 2 ** (2 * 1.75)
+
+
+def test_smooth_core_mask_is_continuous_in_psi():
+    # Moving the boundary by a small amount changes the mask area by a small
+    # amount (d area / d psi_bndry = pi for psi = r^2); the hard mask jumps by
+    # whole cells.
+    n = 65
+    R, Z = np.meshgrid(np.linspace(-1, 1, n), np.linspace(-1, 1, n), indexing="ij")
+    psi = R**2 + Z**2
+    opoint = [(0.0, 0.0, 0.0)]
+    h = 2.0 / (n - 1)
+    levels = 0.36 + np.linspace(-2e-3, 2e-3, 201)
+    jumps = {}
+    for smooth in (True, False):
+        area = np.array(
+            [
+                critical.core_mask(R, Z, psi, opoint, [], psi_bndry=lev, smooth=smooth).sum()
+                for lev in levels
+            ]
+        ) * h * h
+        jumps[smooth] = np.max(np.abs(np.diff(area)))
+    assert jumps[True] < 2 * np.pi * (levels[1] - levels[0])
+    assert jumps[False] >= 0.9 * h * h

@@ -254,7 +254,7 @@ def find_critical(R, Z, psi, discard_xpoints=True):
     return opoint, xpoint
 
 
-def core_mask(R, Z, psi, opoint, xpoint=None, psi_bndry=None):
+def core_mask(R, Z, psi, opoint, xpoint=None, psi_bndry=None, smooth=False):
     """
     Mark the parts of the domain which are in the core
 
@@ -273,10 +273,17 @@ def core_mask(R, Z, psi, opoint, xpoint=None, psi_bndry=None):
     If psi_bndry is not None, then that is used to find the
     separatrix, not the X-points.
 
+    If smooth is True, cells cut by the boundary psi = psi_bndry get the
+    fraction of their area inside it (psi is linearised in the cell), so the
+    mask depends continuously on psi. The default hard 0/1 mask jumps by a
+    whole cell when the boundary crosses a cell centre, which matters when
+    the current does not vanish at the boundary.
+
     Returns
     -------
     numpy.ndarray
         A 2D array [nx,ny] which is 1 inside the core, 0 outside
+        (fractional values in boundary cells if smooth is True)
 
     """
 
@@ -345,7 +352,63 @@ def core_mask(R, Z, psi, opoint, xpoint=None, psi_bndry=None):
                 else:
                     mask[i, j] = 0
 
+    if smooth:
+        mask = _fractional_mask(R, Z, psin, mask)
+
     return mask
+
+
+def _fractional_mask(R, Z, psin, mask):
+    """
+    Replace the 0/1 core mask by the area fraction of each cell with psin < 1,
+    taking psin to be linear in the cell. The fraction is exact for a straight
+    boundary. Only cells in the connected core, and cells adjacent to it, change.
+    """
+    nx, ny = psin.shape
+    dR = R[1, 0] - R[0, 0]
+    dZ = Z[0, 1] - Z[0, 0]
+
+    # Cell size in psin along each axis, from the local gradient
+    gR, gZ = np.gradient(psin, dR, dZ)
+    m1 = np.minimum(abs(gR) * dR, abs(gZ) * dZ)
+    m2 = np.maximum(abs(gR) * dR, abs(gZ) * dZ)
+    # Boundary in cell coordinates: m1*x + m2*y = alpha, x, y in [0,1]
+    alpha = 0.5 * (m1 + m2) - (psin - 1.0)
+
+    tiny = 1e-100 + 1e-12 * m2
+    m1s = np.maximum(m1, tiny)
+    m2s = np.maximum(m2, tiny)
+    frac = np.where(
+        alpha <= 0.0,
+        0.0,
+        np.where(
+            alpha >= m1 + m2,
+            1.0,
+            np.where(
+                alpha < m1,
+                alpha**2 / (2.0 * m1s * m2s),
+                np.where(
+                    alpha < m2,
+                    (2.0 * alpha - m1) / (2.0 * m2s),
+                    1.0 - (m1 + m2 - alpha) ** 2 / (2.0 * m1s * m2s),
+                ),
+            ),
+        ),
+    )
+
+    # Candidates: connected core cells and their 8 neighbours
+    core = mask > 0.5
+    near = core.copy()
+    near[1:, :] |= core[:-1, :]
+    near[:-1, :] |= core[1:, :]
+    near[:, 1:] |= core[:, :-1]
+    near[:, :-1] |= core[:, 1:]
+    near[1:, 1:] |= core[:-1, :-1]
+    near[:-1, :-1] |= core[1:, 1:]
+    near[1:, :-1] |= core[:-1, 1:]
+    near[:-1, 1:] |= core[1:, :-1]
+
+    return np.where(near, frac, 0.0)
 
 
 def find_psisurface(eq, psifunc, r0, z0, r1, z1, psival=1.0, n=100, axis=None,

@@ -26,11 +26,19 @@ eq = freegs.Equilibrium(
     boundary=freegs.boundary.freeBoundaryHagenow,
 )
 
-profiles = freegs.jtor.ConstrainPaxisIp(
-    1e3,  # Plasma pressure on axis [Pascals]
-    2e5,  # Plasma current [Amps]
-    2.0,  # Vacuum f=R*Bt
-)
+
+def make_profiles(eq):
+    # The profile holds a reference to the equilibrium grid it is evaluated on,
+    # so it must be created again for each resolution
+    return freegs.jtor.ConstrainPaxisIp(
+        eq,
+        1e3,  # Plasma pressure on axis [Pascals]
+        2e5,  # Plasma current [Amps]
+        2.0,  # Vacuum f=R*Bt
+    )
+
+
+profiles = make_profiles(eq)
 
 xpoints = [(1.1, -0.6), (1.1, 0.8)]  # (R,Z) locations of X-points
 
@@ -70,6 +78,7 @@ for _ in range(nrefinements):
     eq = freegs.equilibrium.refine(eq)
 
     # Re-solve
+    profiles = make_profiles(eq)
     freegs.solve(eq, profiles, constrain, rtol=rtol, maxits=120)
 
     resolutions.append(eq.R.shape[0])

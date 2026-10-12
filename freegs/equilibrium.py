@@ -94,6 +94,11 @@ class Equilibrium:
         self.Rmax = Rmax
         self.Zmin = Zmin
         self.Zmax = Zmax
+        # Romberg integration requires 2^k + 1 points in each direction
+        for name, n in (("nx", nx), ("ny", ny)):
+            if n < 2 or ((n - 1) & (n - 2)) != 0:
+                raise ValueError(f"{name} must be 2^k + 1 (e.g. 33, 65, 129), got {n}")
+
         self.nx = nx
         self.ny = ny
 
@@ -299,6 +304,11 @@ class Equilibrium:
         the magnetic axis and 1 on the LCFS.
         """
         # return self.plasma_psi + self.tokamak.psi(self.R, self.Z)
+        if self.psi_bndry is None:
+            raise RuntimeError(
+                "psiN is undefined: no boundary flux (psi_bndry is None). "
+                "The boundary needs an X-point or a limiter contact."
+            )
         return (self.psi() - self.psi_axis) / (self.psi_bndry - self.psi_axis)
 
     def psiRZ(self, R, Z):

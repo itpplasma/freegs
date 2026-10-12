@@ -29,14 +29,18 @@ along with FreeGS.  If not, see <http://www.gnu.org/licenses/>.
 
 """
 
-from importlib.metadata import metadata
+from importlib.metadata import PackageNotFoundError, metadata
 
 from . import control, jtor, machine, plotting
 from .dump import OutputFile
 from .equilibrium import Equilibrium
 from .picard import solve
 
-__version__ = metadata(__package__)["Version"]
+try:
+    __version__ = metadata(__package__)["Version"]
+except PackageNotFoundError:
+    # Not installed, e.g. a copy on PYTHONPATH without dist-info
+    __version__ = "unknown"
 
 __all__ = [
     "Equilibrium",

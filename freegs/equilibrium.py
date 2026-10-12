@@ -58,6 +58,7 @@ class Equilibrium:
         current: float = 0.0,
         order: int = 4,
         check_limited: bool = False,
+        smooth_mask: bool = True,
     ):
         """Initialises a plasma equilibrium
 
@@ -84,6 +85,10 @@ class Equilibrium:
             The order of the differential operators to use. Valid values are 2 or 4
         check_limited:
             Checks if the plasma is limited
+        smooth_mask:
+            If True, the core mask holds the area fraction of boundary cells
+            inside the plasma, instead of a hard 0/1 cutoff at cell centres.
+            Use for current profiles which do not vanish at the boundary.
         """
 
         self.tokamak = tokamak
@@ -105,6 +110,7 @@ class Equilibrium:
         self.dZ = self.Z[0, 1] - self.Z[0, 0]
 
         self.check_limited = check_limited
+        self.smooth_mask = smooth_mask
         self.is_limited = False
         self.Rlim = None
         self.Zlim = None
@@ -462,6 +468,8 @@ class Equilibrium:
         """
 
         self._profiles = profiles
+        if self.smooth_mask:
+            profiles.smooth_mask = True
         self._updateBoundaryPsi()
 
         if Jtor is None:
@@ -584,7 +592,13 @@ class Equilibrium:
 
                     # Mask the core
                     self.mask = critical.core_mask(
-                        self.R, self.Z, psi, opt, xpt, self.psi_bndry
+                        self.R,
+                        self.Z,
+                        psi,
+                        opt,
+                        xpt,
+                        self.psi_bndry,
+                        smooth=self.smooth_mask,
                     )
 
                     # Use interpolation to find if a point is in the core.
@@ -604,7 +618,9 @@ class Equilibrium:
                 if xpt:
                     self.psi_xpt = xpt[0][2]
                     self.psi_bndry = self.psi_xpt
-                    self.mask = critical.core_mask(self.R, self.Z, psi, opt, xpt)
+                    self.mask = critical.core_mask(
+                        self.R, self.Z, psi, opt, xpt, smooth=self.smooth_mask
+                    )
 
                     # Use interpolation to find if a point is in the core.
                     self.mask_func = interpolate.RectBivariateSpline(

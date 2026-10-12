@@ -23,6 +23,7 @@ along with FreeGS.  If not, see <http://www.gnu.org/licenses/>.
 
 """
 
+import logging
 import math
 from typing import TYPE_CHECKING, Optional
 
@@ -45,6 +46,8 @@ from .machine import Wall
 
 if TYPE_CHECKING:
     import matplotlib.pyplot as plt
+
+logger = logging.getLogger(__name__)
 
 
 def write(eq, fh, label=None, oxpoints=None, fileformat=geqdsk.write):
@@ -247,14 +250,14 @@ def read(
         if len(data.rlim) > 3:
             machine.wall = Wall(data.rlim, data.zlim)
         else:
-            print("Fewer than 3 points given for limiter/wall. Ignoring.")
+            logger.warning("Fewer than 3 points given for limiter/wall. Ignoring.")
 
     nx = data["nx"]
     ny = data["ny"]
     psi = data["psi"]
 
     if not (isPow2(nx - 1) and isPow2(ny - 1)):
-        print(f"Warning: Input grid size {nx} x {ny} has sizes which are not 2^n+1")
+        logger.warning("Input grid size %d x %d has sizes which are not 2^n+1", nx, ny)
 
         rin = linspace(0, 1, nx)
         zin = linspace(0, 1, ny)
@@ -263,7 +266,7 @@ def read(
         # Ensure that newnx, newny is 2^n + 1
         nx = ceilPow2(nx - 1) + 1
         ny = ceilPow2(ny - 1) + 1
-        print(f"   => Resizing to {nx} x {ny}")
+        logger.info("Resizing to %d x %d", nx, ny)
 
         rnew = linspace(0, 1, nx)
         znew = linspace(0, 1, ny)
@@ -359,7 +362,7 @@ def read(
     Jtor *= mask
 
     # Quick calculation of total toroidal current
-    print("CURRENT: ", romb(romb(Jtor)) * dR * dZ)
+    logger.info("Quick toroidal current estimate: %s", romb(romb(Jtor)) * dR * dZ)
 
     if domain:
         # Change the (R,Z) domain, increasing the resolution if needed
@@ -374,7 +377,7 @@ def read(
             newny = int(ceilPow2(fnewny - 1)) + 1
 
         if (newnx != nx) or (newny != ny):
-            print(f"Changing resolution: {newnx} x {newny}")
+            logger.info("Changing resolution: %d x %d", newnx, newny)
 
         # Create an interpolation function for Jtor and the input psi
         Jtor_func = interpolate.RectBivariateSpline(eq.R[:, 0], eq.Z[0, :], Jtor)
@@ -417,10 +420,8 @@ def read(
     eq.check_limited = True
     eq.solve(profiles, Jtor=Jtor)
 
-    print(
-        "Plasma current: {} Amps, input: {} Amps".format(
-            eq.plasmaCurrent(), data["cpasma"]
-        )
+    logger.info(
+        "Plasma current: %s Amps, input: %s Amps", eq.plasmaCurrent(), data["cpasma"]
     )
 
     # Identify points to constrain: X-points, O-points and separatrix shape
@@ -472,8 +473,9 @@ def read(
         axis.contour(eq.R, eq.Z, eq.psi(), 50, colors="r")
         plt.pause(1)
 
-    # Print the coil currents
-    machine.printCurrents()
+    # Log the coil currents
+    for label, coil in machine.coils:
+        logger.info("Coil %s : %s", label, coil)
 
     ####################################################################
     # Refine the equilibrium to ensure consistency
@@ -500,13 +502,12 @@ def read(
         check_limited=True,
     )
 
-    print(
-        "Plasma current: {} Amps, input: {} Amps".format(
-            eq.plasmaCurrent(), data["cpasma"]
-        )
+    logger.info(
+        "Plasma current: %s Amps, input: %s Amps", eq.plasmaCurrent(), data["cpasma"]
     )
-    print(f"Plasma pressure on axis: {eq.pressure(0.0)} Pascals")
-    machine.printCurrents()
+    logger.info("Plasma pressure on axis: %s Pascals", eq.pressure(0.0))
+    for label, coil in machine.coils:
+        logger.info("Coil %s : %s", label, coil)
 
     # Attempt to find O- and X-points
     psi = eq.psi()

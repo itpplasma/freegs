@@ -1,3 +1,5 @@
+import pytest
+
 from . import equilibrium
 from . import boundary
 from . import jtor
@@ -125,3 +127,37 @@ def test_check_limited_non_square_grid():
     # with nx != ny a transposed array raises in RectBivariateSpline
     eq = _solve_diverted(65, 33)
     assert not eq.is_limited
+
+
+def test_psiN_without_boundary_flux_raises():
+    """
+    With no X-point (and no limiter contact) psi_bndry is None, so psiN is
+    undefined and must raise a clear error
+    """
+    eq = equilibrium.Equilibrium(
+        tokamak=TestTokamak(),
+        Rmin=0.1,
+        Rmax=2.0,
+        Zmin=-1.0,
+        Zmax=1.0,
+        nx=65,
+        ny=65,
+        boundary=boundary.freeBoundaryHagenow,
+    )
+    # A single maximum of psi: an O-point, but no X-point
+    eq._updatePlasmaPsi(-((eq.R - 1.0) ** 2 + eq.Z**2) * 10.0)
+    assert eq.psi_bndry is None
+
+    with pytest.raises(RuntimeError, match="psi_bndry"):
+        eq.psiN()
+
+
+@pytest.mark.parametrize("n", [33, 65, 129])
+def test_grid_size_power_of_two_accepted(n):
+    equilibrium.Equilibrium(Rmin=0.1, Rmax=2.0, Zmin=-1.0, Zmax=1.0, nx=n, ny=n)
+
+
+@pytest.mark.parametrize(("nx", "ny"), [(64, 65), (65, 100), (1, 65)])
+def test_grid_size_not_power_of_two_rejected(nx, ny):
+    with pytest.raises(ValueError, match="2\\^k \\+ 1"):
+        equilibrium.Equilibrium(Rmin=0.1, Rmax=2.0, Zmin=-1.0, Zmax=1.0, nx=nx, ny=ny)

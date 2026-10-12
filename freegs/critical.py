@@ -228,12 +228,38 @@ def find_critical(R, Z, psi, discard_xpoints=True):
             return False
         return True
 
+    def unresolved(opt):
+        """True if the extremum is a grid-scale spike, not a resolved O-point.
+
+        A coil filament inside the grid gives a logarithmic peak of psi, which
+        a fine grid resolves as local extrema with many straight-line
+        connections to X-points. Over one cell, the psi of a magnetic axis
+        changes by a negligible fraction of its depth below the X-points
+        connected to it (~1e-4 or less), that of a spike by a large
+        fraction (~1e-1).
+        """
+        cx = [x for x in xpoint if connected(opt, x)]
+        if not cx:
+            return False
+        depth = max(abs(x[2] - opt[2]) for x in cx)
+        hrr = f(opt[0], opt[1], dx=2, grid=False).item()
+        hzz = f(opt[0], opt[1], dy=2, grid=False).item()
+        hrz = f(opt[0], opt[1], dx=1, dy=1, grid=False).item()
+        curvature = np.linalg.eigvalsh([[hrr, hrz], [hrz, hzz]])
+        return bool(np.abs(curvature).max() * min(dR, dZ) ** 2 > 0.02 * depth)
+
     if len(opoint) > 1 and xpoint:
         # Nearness to the centre of the domain can pick a vacuum O-point
         # (e.g. between coils) when the plasma is off-centre. Prefer the
-        # O-point to which most X-points are connected by monotonic psi.
+        # O-point to which most X-points are connected by monotonic psi,
+        # ignoring grid-scale spikes such as coil filaments inside the grid.
         # The sort is stable, so ties keep the distance ordering.
-        opoint.sort(key=lambda o: -len([x for x in xpoint if connected(o, x)]))
+        opoint.sort(
+            key=lambda o: (
+                unresolved(o),
+                -len([x for x in xpoint if connected(o, x)]),
+            )
+        )
 
     # Draw a line from the O-point to each X-point. Psi should be
     # monotonic; discard those which are not

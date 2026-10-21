@@ -20,10 +20,16 @@ along with FreeGS.  If not, see <http://www.gnu.org/licenses/>.
 
 """
 
+from functools import lru_cache
+
+import numpy as np
 from numpy import concatenate, sqrt
+from numpy.polynomial import Polynomial
+from numpy.polynomial.legendre import leggauss
+from scipy.special import ellipe, ellipk, ellipkm1
 from scipy.integrate import romb  # Romberg integration
 
-from .gradshafranov import Greens
+from .gradshafranov import Greens, mu0
 
 
 def fixedBoundary(eq, Jtor, psi):
@@ -184,42 +190,113 @@ def freeBoundaryHagenow(eq, Jtor, psi):
         / dd
     )
 
-    # Now for each point on the boundary perform a loop integral
+    # Integrate at the boundary itself. Each side uses cubic product
+    # integration, including analytic logarithmic moments at coincident nodes.
+    weights = _hagenow_weights(nx, ny, R[0, 0], R[-1, 0], Z[0, 0], Z[0, -1])
+    values = weights @ concatenate([dUdn_L, dUdn_R, dUdn_D, dUdn_U])
+    psi[0, :] = values[:ny]
+    psi[-1, :] = values[ny : 2 * ny]
+    psi[:, 0] = values[2 * ny : 2 * ny + nx]
+    psi[:, -1] = values[2 * ny + nx :]
 
-    eps = 1e-2
 
-    # List of indices on the boundary
-    # (x index, y index, R change, Z change)
-    # where change in R,Z puts the observation point outside the boundary
-    # to avoid the singularity in G(R,R') when R'=R
+def _hagenow_side(R, Z, Robs, Zobs):
+    """Weights for integral G * dUdn / R on one straight boundary side.
 
-    bndry_indices = [
-        *[(x, 0, 0.0, -eps) for x in range(nx)],  # Down boundary
-        *[(x, ny - 1, 0.0, eps) for x in range(nx)],  # Upper boundary
-        *[(0, y, -eps, 0.0) for y in range(ny)],  # Left boundary
-        *[(nx - 1, y, eps, 0.0) for y in range(ny)],  # Right boundary
+    Interpolate dUdn/sqrt(R) cubically on each panel. On panels touching the
+    observation point, split the kernel into a smooth part and a smooth
+    coefficient times log(distance/panel_length). Integrate the latter with
+    logarithmic product weights; eight-point Gauss handles the smooth part
+    and other panels. Work per observation is linear in the side length.
+    """
+    n = len(R)
+    h = np.hypot(R[1] - R[0], Z[1] - Z[0])
+    panels = np.arange(n - 1)
+    indices = np.minimum(np.maximum(panels - 1, 0), n - 4)[:, None] + np.arange(4)
+    nodes = indices - panels[:, None]
+    t, gauss, log_gauss = _hagenow_quadrature()
+    basis = np.ones((n - 1, 8, 4))
+    for j in range(4):
+        for k in range(4):
+            if j != k:
+                basis[:, :, j] *= (t[None, :] - nodes[:, k, None]) / (
+                    nodes[:, j, None] - nodes[:, k, None]
+                )
+
+    Rq = R[:-1, None] + t * np.diff(R)[:, None]
+    Zq = Z[:-1, None] + t * np.diff(Z)[:, None]
+    distance2 = (Rq - Robs) ** 2 + (Zq - Zobs) ** 2
+    # Compute the complementary elliptic parameter directly: unlike Greens'
+    # clipping, ellipkm1 retains the logarithm arbitrarily close to a source.
+    complement = distance2 / ((Rq + Robs) ** 2 + (Zq - Zobs) ** 2)
+    k2 = 1 - complement
+    coefficient = mu0 * np.sqrt(Robs) / (2 * np.pi)
+    kernel = (
+        coefficient
+        * ((1 + complement) * ellipkm1(complement) - 2 * ellipe(k2))
+        / np.sqrt(k2)
+    )
+
+    correction = np.zeros_like(kernel)
+    for endpoint, parameter, log_weights in [
+        (0, t, log_gauss),
+        (1, 1 - t, log_gauss[::-1]),
+    ]:
+        coincident = np.flatnonzero(
+            (R[panels + endpoint] == Robs) & (Z[panels + endpoint] == Zobs)
+        )
+        for panel in coincident:
+            c = complement[panel]
+            # K(1-c) has log(4/sqrt(c)) coefficient 2*K(c)/pi;
+            # E(1-c) has coefficient 2*(K(c)-E(c))/pi. Thus this is
+            # the complete log coefficient, including higher powers of c.
+            log_coefficient = (
+                coefficient
+                * (2 / np.pi)
+                * (2 * ellipe(c) - (1 - c) * ellipk(c))
+                / np.sqrt(1 - c)
+            )
+            kernel[panel] += log_coefficient * np.log(parameter)
+            correction[panel] = -log_coefficient * log_weights
+
+    panel_weights = h * np.einsum("pq,pqj->pj", kernel * gauss + correction, basis)
+    weights = np.zeros(n)
+    np.add.at(weights, indices.ravel(), panel_weights.ravel())
+    return weights / np.sqrt(R)
+
+
+@lru_cache(maxsize=1)
+def _hagenow_quadrature():
+    """Gauss nodes and product weights for integral_0^1 f(t)*log(t) dt.
+
+    Integrate each degree-seven cardinal polynomial analytically using
+    integral_0^1 t^k log(t) dt = -1/(k+1)^2. No length cutoff is involved.
+    """
+    nodes, weights = leggauss(8)
+    nodes = (nodes + 1) / 2
+    log_weights = []
+    for j, node in enumerate(nodes):
+        others = np.delete(nodes, j)
+        cardinal = Polynomial.fromroots(others) / np.prod(node - others)
+        log_weights.append(sum(-c / (k + 1) ** 2 for k, c in enumerate(cardinal.coef)))
+    return nodes, weights / 2, np.array(log_weights)
+
+
+@lru_cache(maxsize=4)
+def _hagenow_weights(nx, ny, Rmin, Rmax, Zmin, Zmax):
+    """Cache geometry only; no equilibrium or current-dependent state."""
+    r = np.linspace(Rmin, Rmax, nx)
+    z = np.linspace(Zmin, Zmax, ny)
+    sides = [
+        (np.full(ny, Rmin), z),
+        (np.full(ny, Rmax), z),
+        (r, np.full(nx, Zmin)),
+        (r, np.full(nx, Zmax)),
     ]
-
-    # Loop through points on boundary
-    for x, y, Reps, Zeps in bndry_indices:
-        Rpos = R[x, y] + Reps
-        Zpos = Z[x, y] + Zeps
-
-        # Integrate over left boundary
-
-        greenfunc = Greens(R[0, :], Z[0, :], Rpos, Zpos)
-        result = romb(greenfunc * dUdn_L / R[0, :]) * dZ
-
-        # Integrate over right boundary
-        greenfunc = Greens(R[-1, :], Z[-1, :], Rpos, Zpos)
-        result += romb(greenfunc * dUdn_R / R[-1, :]) * dZ
-
-        # Integrate over down boundary
-        greenfunc = Greens(R[:, 0], Z[:, 0], Rpos, Zpos)
-        result += romb(greenfunc * dUdn_D / R[:, 0]) * dR
-
-        # Integrate over upper boundary
-        greenfunc = Greens(R[:, -1], Z[:, -1], Rpos, Zpos)
-        result += romb(greenfunc * dUdn_U / R[:, -1]) * dR
-
-        psi[x, y] = result
+    observations = np.concatenate([np.column_stack(side) for side in sides])
+    return np.array(
+        [
+            np.concatenate([_hagenow_side(R, Z, Robs, Zobs) for R, Z in sides])
+            for Robs, Zobs in observations
+        ]
+    )

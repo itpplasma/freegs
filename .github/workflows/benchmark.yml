@@ -4,8 +4,13 @@
 
 name: Benchmarks
 
-on: pull_request
+on:
 
+  pull_request:
+  merge_group:
+  push:
+    branches:
+      - master
 env:
   PR_HEAD_LABEL: ${{ github.event.pull_request.head.label }}
 
@@ -64,3 +69,8 @@ jobs:
         with:
           name: asv-benchmark-results-${{ runner.os }}
           path: ${{ env.ASV_DIR }}/.asv/results
+    if: >-
+      github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && github.actor != 'github-merge-queue[bot]') || (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'full-ci'))
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || format('{0}-{1}', github.ref, github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}

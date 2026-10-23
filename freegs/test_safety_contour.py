@@ -5,8 +5,8 @@ import numpy as np
 from .critical import find_safety
 
 
-def ellipse_case(kappa=1.0, alpha=0.0, f=32.86, domain_ratio=1.0):
-    r0,c,a=6.2,2.0,.62
+def ellipse_case(kappa=1.0, alpha=0.0, f=32.86, domain_ratio=1.0, c=2.0):
+    r0,a=6.2,.62
     r,z=np.meshgrid(np.linspace(r0-1.8*a,r0+1.8*a,65),
                     np.linspace(-1.8*a*domain_ratio,1.8*a*domain_ratio,65),indexing='ij')
     def coordinates(r,z):
@@ -29,6 +29,25 @@ def ellipse_case(kappa=1.0, alpha=0.0, f=32.86, domain_ratio=1.0):
 
 
 class SafetyContourOracle(unittest.TestCase):
+    def test_independent_geometric_winding_all_field_polarities(self):
+        # In the native canonical cylindrical field Br=-psi_Z/R,
+        # Bz=psi_R/R, theta=atan2(Z,R-Ra) has B.theta_gradient=2*C/R.
+        # Thus dphi/dtheta=F/(2*C*R), including either poloidal polarity.
+        theta=np.arange(8192)*2*np.pi/8192
+        surfaces=np.array([.1,.5,.9])
+        for c in [2.,-2.]:
+            for f in [32.86,-32.86]:
+                eq,exact,axis=ellipse_case(c=c,f=f)
+                radii=.62*np.sqrt(surfaces)
+                R=6.2+radii[:,None]*np.cos(theta)
+                Z=radii[:,None]*np.sin(theta)
+                theta_rate=(eq.Bz(R,Z)*(R-6.2)-eq.Br(R,Z)*Z)/radii[:,None]**2
+                phi_rate=f/R**2
+                winding=np.mean(phi_rate/theta_rate,axis=1)
+                actual=find_safety(eq,psinorm=surfaces,ntheta=128,opoint=axis,xpoint=[])
+                np.testing.assert_allclose(winding,exact(surfaces),rtol=1e-13)
+                np.testing.assert_allclose(actual,winding,rtol=1e-11,atol=1e-12)
+
     def test_circle_signed_exact(self):
         for f in [32.86,-32.86]:
             eq,exact,axis=ellipse_case(f=f)

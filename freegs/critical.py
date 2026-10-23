@@ -506,7 +506,10 @@ def find_safety(
         boundary_flux = eq.psi_bndry
         if boundary_flux is None:
             raise ValueError("No X-point and no known boundary flux")
-    psinormal = (psi - opoint[0][2]) / (boundary_flux - opoint[0][2])
+    flux_span = boundary_flux - opoint[0][2]
+    if not np.isfinite(flux_span) or flux_span == 0:
+        raise ValueError("Safety-factor contour needs a finite nonzero flux span")
+    psinormal = (psi - opoint[0][2]) / flux_span
 
     psifunc = interpolate.RectBivariateSpline(eq.R[:, 0], eq.Z[0, :], psinormal)
 
@@ -585,5 +588,7 @@ def find_safety(
     # Integrand - Btor/(R*Bthe) = Fpol/(R**2*Bthe)
     qint = fpol / (r**2 * Bthe)
 
-    # Integral
-    return sum(qint * dl, axis=1) / (2 * pi)
+    # Br=-psi_Z/R, Bz=psi_R/R: outward-increasing psi circulates CCW
+    # in the R/Z plane. Restore that orientation after using |Bpol| above.
+    # Toroidal polarity remains in F; a full field reversal preserves q.
+    return np.sign(flux_span) * sum(qint * dl, axis=1) / (2 * pi)

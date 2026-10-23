@@ -39,7 +39,7 @@ from numpy import (
     sum,
     zeros,
 )
-from numpy.linalg import inv
+from numpy.linalg import LinAlgError, solve
 from scipy import interpolate
 from scipy.optimize import brentq
 
@@ -77,6 +77,15 @@ def find_critical(R, Z, psi, discard_xpoints=True):
     dR = R[1, 0] - R[0, 0]
     dZ = Z[0, 1] - Z[0, 0]
     radius_sq = 9 * (dR**2 + dZ**2)
+
+    # Newton convergence: step smaller than this fraction of a cell
+    step_tol_sq = (1e-6) ** 2 * min(dR, dZ) ** 2
+    # |D| below this (relative to the typical Hessian of psi over the domain)
+    # is degenerate: neither an O-point nor an X-point
+    Hscale = np.ptp(psi) / min(np.ptp(R), np.ptp(Z)) ** 2
+    Dtol = 1e-8 * Hscale**2
+    # Points converged from neighbouring cells coincide to well below a cell
+    dup_sq = 0.1**2 * min(dR, dZ) ** 2
 
     # Find local minima
 
@@ -123,32 +132,6 @@ def find_critical(R, Z, psi, discard_xpoints=True):
                     Br = -f_scalar(R1, Z1, dy=1) / R1
                     Bz = f_scalar(R1, Z1, dx=1) / R1
 
-                    if Br**2 + Bz**2 < 1e-6:
-                        # Found a minimum. Classify as either
-                        # O-point or X-point
-
-                        dR = R[1, 0] - R[0, 0]
-                        dZ = Z[0, 1] - Z[0, 0]
-                        d2dr2 = (psi[i + 2, j] - 2.0 * psi[i, j] + psi[i - 2, j]) / (
-                            2.0 * dR
-                        ) ** 2
-                        d2dz2 = (psi[i, j + 2] - 2.0 * psi[i, j] + psi[i, j - 2]) / (
-                            2.0 * dZ
-                        ) ** 2
-                        d2drdz = (
-                            (psi[i + 2, j + 2] - psi[i + 2, j - 2]) / (4.0 * dZ)
-                            - (psi[i - 2, j + 2] - psi[i - 2, j - 2]) / (4.0 * dZ)
-                        ) / (4.0 * dR)
-                        D = d2dr2 * d2dz2 - d2drdz**2
-
-                        if D < 0.0:
-                            # Found X-point
-                            xpoint.append((R1, Z1, f_scalar(R1, Z1)))
-                        else:
-                            # Found O-point
-                            opoint.append((R1, Z1, f_scalar(R1, Z1)))
-                        break
-
                     # Jacobian matrix
                     # J = ( dBr/dR, dBr/dZ )
                     #     ( dBz/dR, dBz/dZ )
@@ -158,7 +141,10 @@ def find_critical(R, Z, psi, discard_xpoints=True):
                     J[1, 0] = -Bz / R1 + f_scalar(R1, Z1, dx=2) / R1
                     J[1, 1] = f_scalar(R1, Z1, dx=1, dy=1) / R1
 
-                    d = dot(inv(J), [Br, Bz])
+                    try:
+                        d = solve(J, [Br, Bz])
+                    except LinAlgError:
+                        break  # Singular Jacobian: discard
 
                     R1 = R1 - d[0]
                     Z1 = Z1 - d[1]
@@ -170,13 +156,32 @@ def find_critical(R, Z, psi, discard_xpoints=True):
                         # Discard this point
                         break
 
+                    if d[0] ** 2 + d[1] ** 2 < step_tol_sq:
+                        # Converged: the Newton step is a tiny fraction of a
+                        # cell, independent of the scale of psi.
+                        # Classify using the Hessian of psi, whose
+                        # determinant D < 0 at a saddle and > 0 at an extremum.
+                        d2dr2 = f_scalar(R1, Z1, dx=2)
+                        d2dz2 = f_scalar(R1, Z1, dy=2)
+                        d2drdz = f_scalar(R1, Z1, dx=1, dy=1)
+                        D = d2dr2 * d2dz2 - d2drdz**2
+
+                        if D < -Dtol:
+                            # Found X-point
+                            xpoint.append((R1, Z1, f_scalar(R1, Z1)))
+                        elif D > Dtol:
+                            # Found O-point
+                            opoint.append((R1, Z1, f_scalar(R1, Z1)))
+                        # else: degenerate (D = 0), neither O- nor X-point
+                        break
+
     # Remove duplicates
     def remove_dup(points):
         result = []
         for _n, p in enumerate(points):
             dup = False
             for p2 in result:
-                if (p[0] - p2[0]) ** 2 + (p[1] - p2[1]) ** 2 < 1e-5:
+                if (p[0] - p2[0]) ** 2 + (p[1] - p2[1]) ** 2 < dup_sq:
                     dup = True  # Duplicate
                     break
             if not dup:
@@ -196,42 +201,51 @@ def find_critical(R, Z, psi, discard_xpoints=True):
     Zmid = 0.5 * (Z[0, -1] + Z[0, 0])
     opoint.sort(key=lambda x: (x[0] - Rmid) ** 2 + (x[1] - Zmid) ** 2)
 
+    def connected(opt, xpt):
+        """True if psi is monotonic on a straight line from opt to xpt,
+        ending at the X-point
+        """
+        Ro, Zo, Po = opt
+        Rx, Zx, Px = xpt
+
+        rline = linspace(Ro, Rx, num=50)
+        zline = linspace(Zo, Zx, num=50)
+
+        pline = f(rline, zline, grid=False)
+
+        if Px < Po:
+            pline *= -1.0  # Reverse, so pline is maximum at X-point
+
+        # Now check that pline is monotonic
+        # Tried finding maximum (argmax) and testing
+        # how far that is from the X-point. This can go
+        # wrong because psi can be quite flat near the X-point
+        # Instead here look for the difference in psi
+        # rather than the distance in space
+
+        maxp = amax(pline)
+        if (maxp - pline[-1]) / (maxp - pline[0]) > 0.001:
+            # More than 0.1% drop in psi from maximum to X-point
+            return False
+
+        ind = argmin(pline)  # Should be at O-point
+        if (rline[ind] - Ro) ** 2 + (zline[ind] - Zo) ** 2 > 1e-4:
+            # Too far
+            return False
+        return True
+
+    if len(opoint) > 1 and xpoint:
+        # Nearness to the centre of the domain can pick a vacuum O-point
+        # (e.g. between coils) when the plasma is off-centre. Prefer the
+        # O-point to which most X-points are connected by monotonic psi.
+        # The sort is stable, so ties keep the distance ordering.
+        opoint.sort(key=lambda o: -len([x for x in xpoint if connected(o, x)]))
+
     # Draw a line from the O-point to each X-point. Psi should be
     # monotonic; discard those which are not
 
     if discard_xpoints:
-        Ro, Zo, Po = opoint[0]  # The primary O-point
-        xpt_keep = []
-        for xpt in xpoint:
-            Rx, Zx, Px = xpt
-
-            rline = linspace(Ro, Rx, num=50)
-            zline = linspace(Zo, Zx, num=50)
-
-            pline = f(rline, zline, grid=False)
-
-            if Px < Po:
-                pline *= -1.0  # Reverse, so pline is maximum at X-point
-
-            # Now check that pline is monotonic
-            # Tried finding maximum (argmax) and testing
-            # how far that is from the X-point. This can go
-            # wrong because psi can be quite flat near the X-point
-            # Instead here look for the difference in psi
-            # rather than the distance in space
-
-            maxp = amax(pline)
-            if (maxp - pline[-1]) / (maxp - pline[0]) > 0.001:
-                # More than 0.1% drop in psi from maximum to X-point
-                # -> Discard
-                continue
-
-            ind = argmin(pline)  # Should be at O-point
-            if (rline[ind] - Ro) ** 2 + (zline[ind] - Zo) ** 2 > 1e-4:
-                # Too far, discard
-                continue
-            xpt_keep.append(xpt)
-        xpoint = xpt_keep
+        xpoint = [xpt for xpt in xpoint if connected(opoint[0], xpt)]
 
     # Sort X-points by distance to primary O-point in psi space
     psi_axis = opoint[0][2]
@@ -370,7 +384,14 @@ def find_psisurface(eq, psifunc, r0, z0, r1, z1, psival=1.0, n=100, axis=None,
 
     else:
         # Only one value
-        ind = argmax(pnorm > psival)
+        outside = pnorm > psival
+        if not outside.any():
+            raise ValueError(
+                "find_psisurface: flux surface %g is not bracketed; psi along the "
+                "line from (%g, %g) to (%g, %g) only reaches %g"
+                % (psival, r0, z0, r1, z1, pnorm.max())
+            )
+        ind = argmax(outside)
 
         if ind == 0:
             if refine:
@@ -432,6 +453,14 @@ def find_separatrix(
 
     if (opoint is None) or (xpoint is None):
         opoint, xpoint = find_critical(eq.R, eq.Z, psi)
+
+    if len(opoint) == 0:
+        raise ValueError("find_separatrix: no O-point (magnetic axis) found")
+    if len(xpoint) == 0:
+        raise ValueError(
+            "find_separatrix: no X-point found; the separatrix is only defined "
+            "for diverted equilibria"
+        )
 
     psinorm = (psi - opoint[0][2]) / (eq.psi_bndry - opoint[0][2])
 
